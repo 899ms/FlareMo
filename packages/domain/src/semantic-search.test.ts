@@ -1,0 +1,181 @@
+import type { UserRow } from "@flaremo/db";
+import { applyFlaremoMigrations, createDb, memos } from "@flaremo/db";
+import { eq } from "drizzle-orm";
+import { Miniflare } from "miniflare";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type {
+  EmbeddingProvider,
+  VectorIndex,
+  VectorIndexInfo,
+  VectorIndexMatch,
+  VectorIndexVector,
+} from "./embedding";
+import { createMemo } from "./memos";
+import { semanticSearchMemos } from "./semantic-search";
+import { createFlaremoMember, ensureSingleUser } from "./users";
+
+let mf: Miniflare;
+let db: ReturnType<typeof createDb>;
+let user: UserRow;
+
+class FakeVectorIndex implements VectorIndex {
+  vectors = new Map<string, VectorIndexVector>();
+  matches: VectorIndexMatch[] = [];
+  lastNamespace: string | undefined;
+  namespaces: string[] = [];
+
+  async query(
+    _vector: number[],
+    _topK: number,
+    namespace?: string,
+  ): Promise<VectorIndexMatch[]> {
+    this.lastNamespace = namespace;
+    if (namespace) this.namespaces.push(namespace);
+    return this.matches;
+  }
+  async upsert(vectors: VectorIndexVector[]) {
+    for (const vector of vectors) this.vectors.set(vector.id, vector);
+  }
+  async deleteByIds(ids: string[]) {
+    for (const id of ids) this.vectors.delete(id);
+  }
+  async describe(): Promise<VectorIndexInfo> {
+    return { vectorCount: this.vectors.size, dimensions: 4 };
+  }
+}
+
+const provider: EmbeddingProvider = {
+  model: "test-model",
+  dimensions: 4,
+  async embed(texts: string[]) {
+    return texts.map(() => [1, 0, 0, 0]);
+  },
+};
+
+describe("semanticSearchMemos", () => {
+  beforeEach(async () => {
+    mf = new Miniflare({
+      script: "export default { fetch() { return new Response('ok') } }",
+      modules: true,
+      compatibilityDate: "2026-07-10",
+      compatibilityFlags: ["nodejs_compat"],
+      d1Databases: { DB: "flaremo-semantic-test" },
+    });
+    const database = await mf.getD1Database("DB");
+    db = createDb(database);
+    await applyFlaremoMigrations(database);
+    user = await ensureSingleUser(db, {
+      email: "owner@example.com",
+      name: "Owner",
+    });
+  });
+
+  afterEach(async () => {
+    await mf.dispose();
+  });
+
+  it("returns re-checked D1 hits ordered by score", async () => {
+    const a = await createMemo(db, user, {
+      content: "关于日志方案的笔记",
+      visibility: "private",
+      source: "web",
+    });
+    const b = await createMemo(db, user, {
+      content: "关于部署的笔记",
+      visibility: "private",
+      source: "web",
+    });
+
+    const index = new FakeVectorIndex();
+    index.matches = [
+      { id: `${b.id}#chunks/0`, score: 0.9 },
+      { id: `${a.id}#chunks/0`, score: 0.6 },
+    ];
+
+    const hits = await semanticSearchMemos(
+      db,
+      user,
+      { provider, index },
+      "日志",
+      10,
+    );
+    expect(hits.map((hit) => hit.id)).toEqual([b.id, a.id]);
+  });
+
+  it("drops hits for memos that are no longer indexable", async () => {
+    const a = await createMemo(db, user, {
+      content: "一条会被删除的笔记",
+      visibility: "private",
+      source: "web",
+    });
+
+    const index = new FakeVectorIndex();
+    // The vector is stale — the memo was trashed after indexing.
+    index.matches = [{ id: `${a.id}#chunks/0`, score: 0.8 }];
+    await db.update(memos).set({ status: "trashed" }).where(eq(memos.id, a.id));
+
+    const hits = await semanticSearchMemos(
+      db,
+      user,
+      { provider, index },
+      "删除",
+      10,
+    );
+    expect(hits).toEqual([]);
+  });
+
+  it("scopes the vector query to the caller's namespace", async () => {
+    const a = await createMemo(db, user, {
+      content: "租户隔离测试",
+      visibility: "private",
+      source: "web",
+    });
+    const index = new FakeVectorIndex();
+    index.matches = [{ id: `${a.id}#chunks/0`, score: 0.9 }];
+
+    await semanticSearchMemos(
+      db,
+      user,
+      { provider, index, namespace: user.id },
+      "租户",
+      10,
+    );
+    expect(index.lastNamespace).toBe(user.id);
+  });
+
+  it("returns team memos but never another member's private memo", async () => {
+    const member = await createFlaremoMember(db, {
+      email: "member@example.com",
+      name: "Member",
+    });
+    const privateMemo = await createMemo(db, user, {
+      content: "owner private",
+      visibility: "private",
+      source: "web",
+    });
+    const teamMemo = await createMemo(db, user, {
+      content: "owner team",
+      visibility: "protected",
+      source: "web",
+    });
+    const index = new FakeVectorIndex();
+    index.matches = [
+      { id: `${privateMemo.id}#chunks/0`, score: 0.95 },
+      { id: `${teamMemo.id}#chunks/0`, score: 0.9 },
+    ];
+
+    const hits = await semanticSearchMemos(
+      db,
+      member,
+      { provider, index },
+      "owner",
+      10,
+    );
+
+    expect(hits).toEqual([{ id: teamMemo.id, score: 0.9 }]);
+    // Memo vectors share one namespace: a single default-namespace query
+    // covers every author.
+    expect(index.namespaces).toEqual([]);
+    expect(index.lastNamespace).toBeUndefined();
+  });
+});

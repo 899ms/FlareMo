@@ -30,7 +30,7 @@ pnpm verify
 pnpm deploy:dry-run
 ```
 
-项目不使用 GitHub Actions 作为 CI。PR 作者需要在本地跑完门禁，并在 PR 里写明结果。
+项目不使用 GitHub Actions 作为 CI 或生产部署器。PR 作者需要在本地跑完门禁，并在 PR 里写明结果。仓库中的 `flaremo-update.yml` 只服务自部署用户自己的部署仓库，用于把上游 Release 准备成升级 PR。
 
 如需自动修复格式：
 
@@ -45,6 +45,12 @@ pnpm format
 - 说明是否影响 Memos 兼容 API。
 - 说明是否影响 Cloudflare Access、D1、R2 或部署流程。
 - 附上验证命令和结果。
+
+## 许可
+
+- FlareMo 以 AGPL-3.0 授权。提交 issue、PR 或其他贡献即表示同意将其按 AGPL-3.0 授权给本项目与所有下游使用者。
+- 贡献者同时授予项目版权持有者一项许可：可以在 AGPL-3.0 之外（含商业托管版本）使用、再授权这些贡献。
+- 明确不提交的权利（如受雇作品归属）请先在 issue 中说明，再开始实现。
 
 ## 架构边界
 

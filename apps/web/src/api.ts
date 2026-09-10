@@ -1,92 +1,155 @@
-export type MemoVisibility = "private" | "protected" | "public";
-export type MemoState = "normal" | "archived" | "trashed" | "deleted";
+import type {
+  AppNotificationDto,
+  AttachmentDto,
+  CreateMemoInput,
+  CreateMemoryInput,
+  CreateProjectInput,
+  CreateTaskInput,
+  DailyReviewResponse,
+  DataTaskDto,
+  DeleteTagResponse,
+  ImportBundle,
+  ImportResult,
+  ListAppNotificationsResponse,
+  ListMemosResponse,
+  MemoContextResponse,
+  MemoDto,
+  MemoryDto,
+  MemoryRelationDto,
+  MemoryRevisionDto,
+  MemoState,
+  MemoStatsResponse,
+  MemoVisibility,
+  ProjectDto,
+  PublicShareDto,
+  RandomMemoResponse,
+  RelatedMemosResponse,
+  RenameTagResponse,
+  ReviewWalkVia,
+  ShareDto,
+  TagHierarchyResponse,
+  TaskDto,
+  TaskPriority,
+  TaskStatus,
+  UpdateMemoInput,
+  UpdateMemoryInput,
+  UpdateProjectInput,
+  UpdateTaskInput,
+  VectorUsageReport,
+  WalkNextResponse,
+} from "@flaremo/contracts";
 
-export type MemoPayload = {
-  tags?: string[];
-  property?: {
-    title?: string;
-    has_link?: boolean;
-    has_task_list?: boolean;
-    has_code?: boolean;
-    has_incomplete_tasks?: boolean;
-  };
-  location?: unknown;
-  client_id?: string;
-  [key: string]: unknown;
+export type Attachment = AttachmentDto;
+export type Memo = MemoDto;
+export type MemoPayload = MemoDto["payload"];
+export type Share = ShareDto;
+export type PublicShare = PublicShareDto;
+export type MemoContext = MemoContextResponse;
+export type RelatedMemo = RelatedMemosResponse["memos"][number];
+export type TagHierarchyNode = TagHierarchyResponse["tags"][number];
+export type AppNotification = AppNotificationDto;
+export type Memory = MemoryDto;
+export type MemoryRevision = MemoryRevisionDto;
+export type MemoryRelation = MemoryRelationDto;
+export type {
+  MemoState,
+  MemoStatsResponse,
+  MemoVisibility,
+  ReviewWalkVia,
+  VectorUsageReport,
 };
 
-export type Memo = {
-  name: string;
-  id: string;
-  content: string;
-  visibility: MemoVisibility;
-  state: MemoState;
-  pinned: boolean;
-  payload: MemoPayload;
-  create_time: string;
-  update_time: string;
-  display_time: string;
-  creator: string;
-  attachments?: Attachment[];
-};
+export type CreateMemoRequest = CreateMemoInput;
+export type UpdateMemoRequest = UpdateMemoInput;
+export type CreateMemoryRequest = CreateMemoryInput;
+export type UpdateMemoryRequest = UpdateMemoryInput;
 
-export type Attachment = {
-  name: string;
-  id: string;
-  memo: string | null;
-  filename: string;
-  content_type: string | null;
-  size: number;
-  payload: Record<string, unknown>;
-  create_time: string;
-  update_time: string;
-  download_url: string;
-};
-
-export type Share = {
-  name: string;
-  id: string;
-  memo: string;
-  token: string;
-  expires_at: string | null;
-  create_time: string;
-};
-
-export type PublicShare = {
-  share: Omit<Share, "token">;
-  memo: Memo;
-  attachments: Attachment[];
-};
-
-export type ListMemosResponse = {
-  memos: Memo[];
-  next_page_token?: string;
-};
-
-export type ListAttachmentsResponse = {
-  attachments: Attachment[];
-};
-
-export type CreateMemoRequest = {
-  content: string;
-  visibility?: MemoVisibility;
-  payload?: MemoPayload;
-  source?: string;
-};
-
-export type UpdateMemoRequest = Partial<{
-  content: string;
-  visibility: MemoVisibility;
-  status: MemoState;
-  pinned: boolean;
-  payload: MemoPayload;
-}>;
+export type Project = ProjectDto;
+export type Task = TaskDto;
+export type CreateProjectRequest = CreateProjectInput;
+export type UpdateProjectRequest = UpdateProjectInput;
+export type CreateTaskRequest = CreateTaskInput;
+export type UpdateTaskRequest = UpdateTaskInput;
+export type { TaskPriority, TaskStatus };
 
 export type ListMemoParams = {
   state?: MemoState;
   q?: string;
   tag?: string;
+  untagged?: boolean;
   include_deleted?: boolean;
+  page_size?: number;
+  page_token?: string;
+};
+
+export type AppInfo = {
+  ok: true;
+  product: "FlareMo";
+  version: string;
+  update_repository: string | null;
+  update_workflow_url: string | null;
+  releases_url: string;
+  update_guide_url: string;
+};
+
+export type LatestRelease = {
+  version: string;
+  name: string;
+  published_at: string | null;
+  url: string;
+};
+
+export type BootstrapStatus = {
+  initialized: boolean;
+  state: "ready" | "complete" | "recovery_required";
+  setup_available: boolean;
+};
+
+export type PersonalAccessToken = {
+  id: string;
+  name: string | null;
+  start: string | null;
+  prefix: string | null;
+  enabled: boolean;
+  expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+  last_request: string | null;
+  request_count: number;
+  rate_limit_enabled: boolean;
+  rate_limit_max: number | null;
+  rate_limit_time_window: number | null;
+};
+
+export const AUTHENTICATION_REQUIRED_EVENT = "flaremo:authentication-required";
+
+export type RegistrationStatus = {
+  registration_open: boolean;
+  initialized: boolean;
+  email_verification_required: boolean;
+  captcha: {
+    provider: "none" | "tencent" | "http";
+    site_key: string | null;
+  };
+};
+
+export type CurrentFlareMoUser = {
+  id: string;
+  role: "owner" | "admin" | "member";
+  status: "active" | "removed";
+  name: string;
+  email: string;
+  username: string;
+};
+
+export type AdminUser = {
+  id: string;
+  email: string;
+  name: string;
+  username: string;
+  role: "owner" | "admin" | "member";
+  status: "active" | "removed";
+  created_at: string;
 };
 
 export class ApiError extends Error {
@@ -101,14 +164,568 @@ export class ApiError extends Error {
 
 export async function listMemos(params: ListMemoParams = {}) {
   const query = new URLSearchParams();
-  query.set("page_size", "50");
+  query.set("page_size", String(params.page_size ?? 30));
   query.set("order_by", "created_at desc");
   if (params.state) query.set("state", params.state);
   if (params.q) query.set("q", params.q);
   if (params.tag) query.set("tag", params.tag);
+  if (params.untagged) query.set("untagged", "true");
   if (params.include_deleted) query.set("include_deleted", "true");
+  if (params.page_token) query.set("page_token", params.page_token);
 
   return apiRequest<ListMemosResponse>(`/api/app/memos?${query.toString()}`);
+}
+
+export async function semanticSearchMemos(query: string, limit = 10) {
+  const params = new URLSearchParams();
+  params.set("q", query);
+  params.set("limit", String(limit));
+  return apiRequest<{ memos: MemoDto[]; degraded: boolean }>(
+    `/api/app/search/semantic?${params.toString()}`,
+  );
+}
+
+export async function getVectorUsage() {
+  return apiRequest<VectorUsageReport>("/api/app/usage/vector");
+}
+
+export async function getTagHierarchy() {
+  return apiRequest<TagHierarchyResponse>("/api/app/tags");
+}
+
+export async function renameTag(input: { from: string; to: string }) {
+  return apiRequest<RenameTagResponse>("/api/app/tags", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteTag(tag: string) {
+  return apiRequest<DeleteTagResponse>(
+    `/api/app/tags?tag=${encodeURIComponent(tag)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function getMemoStats(timeZone: string) {
+  const query = new URLSearchParams({ time_zone: timeZone });
+  return apiRequest<MemoStatsResponse>(`/api/app/stats?${query.toString()}`);
+}
+
+export async function getDailyReview(date: string, tzOffsetMinutes: number) {
+  const query = new URLSearchParams({
+    date,
+    tzOffset: String(tzOffsetMinutes),
+  });
+  return apiRequest<DailyReviewResponse>(
+    `/api/app/review/daily?${query.toString()}`,
+  );
+}
+
+export async function getRandomWalkMemo(exclude: string[] = []) {
+  const query = new URLSearchParams();
+  if (exclude.length > 0) query.set("exclude", exclude.join(","));
+  return apiRequest<RandomMemoResponse>(
+    `/api/app/review/random?${query.toString()}`,
+  );
+}
+
+export async function getWalkNextMemo(memoId: string, exclude: string[] = []) {
+  const query = new URLSearchParams({ memoId });
+  if (exclude.length > 0) query.set("exclude", exclude.join(","));
+  return apiRequest<WalkNextResponse>(
+    `/api/app/review/walk?${query.toString()}`,
+  );
+}
+
+export async function getAppInfo() {
+  return apiRequest<AppInfo>("/api/app/health");
+}
+
+export async function listNotifications() {
+  const query = new URLSearchParams({ page_size: "50" });
+  return apiRequest<ListAppNotificationsResponse>(
+    `/api/app/notifications?${query.toString()}`,
+  );
+}
+
+export async function archiveNotification(name: string) {
+  const id = name.split("/").pop() ?? name;
+  return apiRequest<AppNotification>(
+    `/api/app/notifications/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: JSON.stringify({ status: "archived" }) },
+  );
+}
+
+export type ListMemoriesParams = {
+  q?: string;
+  type?: Memory["type"];
+  kind?: Memory["kind"];
+  scope_type?: Memory["scope_type"];
+  scope_key?: string;
+  tier?: Memory["tier"];
+  verification?: Memory["verification"];
+  status?: Memory["status"];
+  source_agent?: string;
+  needs_review?: boolean;
+};
+
+export async function listMemories(params: ListMemoriesParams = {}) {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  if (params.type) query.set("type", params.type);
+  if (params.kind) query.set("kind", params.kind);
+  if (params.scope_type) query.set("scope_type", params.scope_type);
+  if (params.scope_key) query.set("scope_key", params.scope_key);
+  if (params.tier) query.set("tier", params.tier);
+  if (params.verification) query.set("verification", params.verification);
+  if (params.status) query.set("status", params.status);
+  if (params.source_agent) query.set("source_agent", params.source_agent);
+  if (params.needs_review !== undefined)
+    query.set("needs_review", String(params.needs_review));
+
+  return apiRequest<{ memories: Memory[] }>(
+    `/api/app/memory?${query.toString()}`,
+  );
+}
+
+export async function listMemoryReview() {
+  return apiRequest<{ memories: Memory[] }>("/api/app/memory/review");
+}
+
+export async function createMemory(input: CreateMemoryRequest) {
+  return apiRequest<{ duplicate: boolean; memory: Memory }>("/api/app/memory", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateMemory(id: string, input: UpdateMemoryRequest) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+export async function deleteMemory(id: string) {
+  return apiRequest<{ ok: true }>(`/api/app/memory/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function confirmMemory(id: string) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}/confirm`,
+    { method: "POST" },
+  );
+}
+
+export async function lockMemory(id: string) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}/lock`,
+    { method: "POST" },
+  );
+}
+
+export async function unlockMemory(id: string) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}/unlock`,
+    { method: "POST" },
+  );
+}
+
+export async function archiveMemory(id: string) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}/archive`,
+    { method: "POST" },
+  );
+}
+
+export async function listMemoryRevisions(id: string) {
+  return apiRequest<{ revisions: MemoryRevision[] }>(
+    `/api/app/memory/${encodeURIComponent(id)}/revisions`,
+  );
+}
+
+// --- Projects ---------------------------------------------------------------
+
+export async function listProjects(
+  params: { status?: Project["status"] } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.status) query.set("status", params.status);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiRequest<{ projects: Project[] }>(`/api/app/projects${suffix}`);
+}
+
+export async function createProject(input: CreateProjectRequest) {
+  return apiRequest<{ project: Project }>("/api/app/projects", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateProject(id: string, input: UpdateProjectRequest) {
+  return apiRequest<{ project: Project }>(
+    `/api/app/projects/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+export async function archiveProject(id: string, archived: boolean) {
+  return apiRequest<{ project: Project }>(
+    `/api/app/projects/${encodeURIComponent(id)}/${
+      archived ? "archive" : "unarchive"
+    }`,
+    { method: "POST" },
+  );
+}
+
+export async function deleteProject(id: string) {
+  return apiRequest<{ ok: true }>(
+    `/api/app/projects/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+// --- Tasks ------------------------------------------------------------------
+
+export async function listTasks(
+  params: { project_id?: string; status?: Task["status"] } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.project_id) query.set("project_id", params.project_id);
+  if (params.status) query.set("status", params.status);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiRequest<{ tasks: Task[] }>(`/api/app/tasks${suffix}`);
+}
+
+export async function createTask(input: CreateTaskRequest) {
+  return apiRequest<{ task: Task }>("/api/app/tasks", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateTask(id: string, input: UpdateTaskRequest) {
+  return apiRequest<{ task: Task }>(
+    `/api/app/tasks/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function deleteTask(id: string) {
+  return apiRequest<{ ok: true }>(`/api/app/tasks/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function createMemoryFromMemo(
+  memoId: string,
+  input: {
+    content?: string;
+    type?: Memory["type"];
+    kind?: Memory["kind"];
+    scope_type?: Memory["scope_type"];
+    scope_key?: string;
+    tier?: Memory["tier"];
+    importance?: number;
+    lock?: boolean;
+  },
+) {
+  return apiRequest<{ duplicate: boolean; memory: Memory }>(
+    `/api/app/memos/${encodeURIComponent(memoId)}/memory`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function promoteMemoryToMemo(id: string) {
+  return apiRequest<{ memory: Memory; memo: string }>(
+    `/api/app/memory/${encodeURIComponent(id)}/promote`,
+    { method: "POST" },
+  );
+}
+
+// Repository used when the server does not advertise one via
+// /api/app/health (`update_repository`).
+const DEFAULT_RELEASE_REPOSITORY = "realchendahuang/FlareMo";
+
+export async function getLatestRelease(
+  repository: string | null | undefined = DEFAULT_RELEASE_REPOSITORY,
+): Promise<LatestRelease> {
+  const repo = repository || DEFAULT_RELEASE_REPOSITORY;
+  const response = await fetch(
+    `https://api.github.com/repos/${repo}/releases/latest`,
+    {
+      credentials: "omit",
+      headers: {
+        accept: "application/vnd.github+json",
+      },
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`GitHub release check failed (${response.status})`);
+  }
+  const release = (await response.json()) as {
+    tag_name?: unknown;
+    name?: unknown;
+    published_at?: unknown;
+  };
+  const version =
+    typeof release.tag_name === "string"
+      ? release.tag_name.replace(/^v/, "")
+      : "";
+  if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error("GitHub returned an invalid FlareMo release version");
+  }
+  return {
+    version,
+    name:
+      typeof release.name === "string" && release.name
+        ? release.name
+        : `v${version}`,
+    published_at:
+      typeof release.published_at === "string" ? release.published_at : null,
+    url: `https://github.com/${repo}/releases/tag/v${encodeURIComponent(version)}`,
+  };
+}
+
+export async function getBootstrapStatus() {
+  return apiRequest<BootstrapStatus>(
+    "/api/auth/flaremo/bootstrap/status",
+    {},
+    {
+      authRequired: false,
+    },
+  );
+}
+
+export async function getRegistrationStatus() {
+  return apiRequest<RegistrationStatus>(
+    "/api/auth/flaremo/register/status",
+    {},
+    { authRequired: false },
+  );
+}
+
+export async function registerAccount(
+  input: {
+    name: string;
+    email: string;
+    password: string;
+  },
+  captcha?: { ticket: string; randstr: string },
+) {
+  return apiRequest<{ ok: true }>(
+    "/api/auth/flaremo/register",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+      headers: captcha
+        ? {
+            "x-flaremo-captcha-ticket": captcha.ticket,
+            "x-flaremo-captcha-randstr": captcha.randstr,
+          }
+        : undefined,
+    },
+    { authRequired: false },
+  );
+}
+
+export async function verifyEmail(token: string) {
+  return apiRequest<{ ok: true }>(
+    `/api/auth/flaremo/verify-email?token=${encodeURIComponent(token)}`,
+    {},
+    { authRequired: false },
+  );
+}
+
+export async function resendVerificationEmail(email: string) {
+  return apiRequest<{ ok: true }>(
+    "/api/auth/flaremo/resend-verification",
+    {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    },
+    { authRequired: false },
+  );
+}
+
+export async function requestPasswordReset(email: string) {
+  return apiRequest<{ ok: true }>(
+    "/api/auth/flaremo/forgot-password",
+    {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    },
+    { authRequired: false },
+  );
+}
+
+export async function verifyEmailChange(token: string) {
+  return apiRequest<{ ok: true }>(
+    `/api/auth/flaremo/verify-email-change?token=${encodeURIComponent(token)}`,
+    {},
+    { authRequired: false },
+  );
+}
+
+export async function deleteAccount(currentPassword: string) {
+  return apiRequest<{ ok: true }>("/api/app/account", {
+    method: "DELETE",
+    body: JSON.stringify({ current_password: currentPassword }),
+  });
+}
+
+export async function getCurrentFlareMoUser() {
+  return apiRequest<CurrentFlareMoUser>("/api/app/me");
+}
+
+export async function listAdminUsers() {
+  return apiRequest<{ users: AdminUser[] }>("/api/app/admin/users");
+}
+
+export async function createAdminUser(input: { name: string; email: string }) {
+  return apiRequest<
+    AdminUser & {
+      activation_path: string;
+      activation_expires_in_seconds: number;
+    }
+  >("/api/app/admin/users", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteAdminUser(id: string) {
+  return apiRequest<{ ok: true }>(
+    `/api/app/admin/users/${encodeURIComponent(id)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export async function updateAdminUserRole(
+  id: string,
+  role: "admin" | "member",
+) {
+  return apiRequest<AdminUser>(
+    `/api/app/admin/users/${encodeURIComponent(id)}/role`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    },
+  );
+}
+
+export async function requestAdminPasswordReset(id: string) {
+  return apiRequest<{
+    token: string;
+    reset_path: string;
+    expires_in_seconds: number;
+  }>(`/api/app/admin/users/${encodeURIComponent(id)}/reset-password`, {
+    method: "POST",
+  });
+}
+
+export async function resetPassword(input: {
+  token: string;
+  newPassword: string;
+}) {
+  return apiRequest<{ status: boolean }>(
+    "/api/auth/reset-password",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        newPassword: input.newPassword,
+        token: input.token,
+      }),
+    },
+    { authRequired: false },
+  );
+}
+
+export async function recoverOwner(input: {
+  newPassword: string;
+  recoverySecret: string;
+}) {
+  return apiRequest<{ ok: true }>(
+    "/api/auth/flaremo/recover",
+    {
+      method: "POST",
+      headers: {
+        "x-flaremo-recovery-secret": input.recoverySecret,
+      },
+      body: JSON.stringify({ new_password: input.newPassword }),
+    },
+    { authRequired: false },
+  );
+}
+
+export async function bootstrapOwner(input: {
+  name: string;
+  email: string;
+  password: string;
+  bootstrapSecret: string;
+}) {
+  return apiRequest<{ ok: true }>(
+    "/api/auth/flaremo/bootstrap",
+    {
+      method: "POST",
+      headers: {
+        "x-flaremo-bootstrap-secret": input.bootstrapSecret,
+      },
+      body: JSON.stringify({
+        name: input.name,
+        email: input.email,
+        password: input.password,
+      }),
+    },
+    { authRequired: false },
+  );
+}
+
+export async function listPersonalAccessTokens() {
+  return apiRequest<{ personal_access_tokens: PersonalAccessToken[] }>(
+    "/api/app/account/personal-access-tokens",
+  );
+}
+
+export async function createPersonalAccessToken(input: {
+  name: string;
+  expires_in_days?: number | null;
+}) {
+  return apiRequest<{
+    personal_access_token: PersonalAccessToken;
+    token: string;
+  }>("/api/app/account/personal-access-tokens", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function revokePersonalAccessToken(id: string) {
+  return apiRequest<{ personal_access_token: PersonalAccessToken }>(
+    `/api/app/account/personal-access-tokens/${encodeURIComponent(id)}/revoke`,
+    { method: "POST" },
+  );
+}
+
+export async function changeEmail(input: {
+  current_password: string;
+  new_email: string;
+}) {
+  return apiRequest<{ ok: true; verification_sent?: boolean }>(
+    "/api/app/account/email",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 export async function createMemo(input: CreateMemoRequest) {
@@ -119,59 +736,42 @@ export async function createMemo(input: CreateMemoRequest) {
 }
 
 export async function updateMemo(id: string, input: UpdateMemoRequest) {
-  return apiRequest<Memo>(`/api/app/memos/${id}`, {
+  return apiRequest<Memo>(`/api/app/memos/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify(input),
   });
 }
 
 export async function trashMemo(id: string) {
-  return apiRequest<Memo>(`/api/app/memos/${id}`, {
+  return apiRequest<Memo>(`/api/app/memos/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
 
 export async function hardDeleteMemo(id: string) {
-  return apiRequest<{ ok: true }>(`/api/app/memos/${id}?hard=true`, {
-    method: "DELETE",
-  });
+  return apiRequest<{ ok: true }>(
+    `/api/app/memos/${encodeURIComponent(id)}?hard=true`,
+    { method: "DELETE" },
+  );
 }
 
-export async function uploadAttachment(input: { file: File; memo?: string }) {
+export async function uploadAttachment(input: {
+  file: File;
+  memo?: string;
+  clientId?: string;
+}) {
   const formData = new FormData();
   formData.set("file", input.file);
   if (input.memo) {
     formData.set("memo", input.memo);
   }
+  if (input.clientId) {
+    formData.set("client_id", input.clientId);
+  }
   return apiRequest<Attachment>("/api/v1/attachments", {
     method: "POST",
     body: formData,
   });
-}
-
-export async function listMemoAttachments(memo: string) {
-  return apiRequest<ListAttachmentsResponse>(
-    `/api/v1/memos/${encodeURIComponent(memo)}/attachments`,
-  );
-}
-
-export async function bindMemoAttachments(memo: string, attachments: string[]) {
-  return apiRequest<ListAttachmentsResponse>(
-    `/api/v1/memos/${encodeURIComponent(memo)}/attachments`,
-    {
-      method: "PATCH",
-      body: JSON.stringify({ attachments }),
-    },
-  );
-}
-
-export async function deleteAttachment(id: string) {
-  return apiRequest<{ ok: true }>(
-    `/api/v1/attachments/${encodeURIComponent(id)}`,
-    {
-      method: "DELETE",
-    },
-  );
 }
 
 export async function createShare(memo: string) {
@@ -181,39 +781,127 @@ export async function createShare(memo: string) {
   });
 }
 
-export async function getPublicShare(token: string) {
-  return apiRequest<PublicShare>(
-    `/api/public/shares/${encodeURIComponent(token)}`,
+export async function getMemoContext(id: string) {
+  return apiRequest<MemoContext>(`/api/app/memos/${encodeURIComponent(id)}`);
+}
+
+export async function getRelatedMemos(id: string) {
+  return apiRequest<RelatedMemosResponse>(
+    `/api/app/memos/${encodeURIComponent(id)}/related`,
   );
 }
 
-export async function exportData() {
-  return apiRequest<unknown>("/api/v1/export");
-}
-
-export async function importData(bundle: unknown) {
-  return apiRequest<{
-    imported_memos: number;
-    imported_attachments: number;
-    imported_relations: number;
-    imported_shares: number;
-  }>("/api/v1/import", {
-    method: "POST",
-    body: JSON.stringify(bundle),
+export async function revokeShare(id: string) {
+  return apiRequest<Share>(`/api/v1/shares/${encodeURIComponent(id)}`, {
+    method: "DELETE",
   });
 }
 
-async function apiRequest<T>(path: string, init: RequestInit = {}) {
+export async function restoreMemoRevision(memo: string, revision: string) {
+  return apiRequest<Memo>(
+    `/api/v1/memos/${encodeURIComponent(memo)}/revisions/restore`,
+    {
+      method: "POST",
+      body: JSON.stringify({ revision }),
+    },
+  );
+}
+
+export async function replaceMemoRelations(
+  memo: string,
+  relations: Array<{
+    related_memo: string;
+    type: "reference" | "comment";
+  }>,
+) {
+  return apiRequest<{
+    relations: MemoContext["relations"][number]["relation"][];
+  }>(`/api/v1/memos/${encodeURIComponent(memo)}/relations`, {
+    method: "PATCH",
+    body: JSON.stringify({ relations }),
+  });
+}
+
+export async function getPublicShare(token: string) {
+  return apiRequest<PublicShare>(
+    `/api/public/shares/${encodeURIComponent(token)}`,
+    {},
+    { authRequired: false },
+  );
+}
+
+/**
+ * Fetch the complete small export bundle. The worker returns 413 when the
+ * bundle would exceed its inline response budget; callers can then fall back
+ * to the chunked export-task flow without guessing the payload size locally.
+ */
+export async function exportDataInline(includeBinary = true) {
+  const query = new URLSearchParams({
+    include_binary: String(includeBinary),
+  });
+  return apiRequest<ImportBundle>(`/api/v1/export?${query.toString()}`);
+}
+
+export async function createExportTask() {
+  return apiRequest<{ task: DataTaskDto }>("/api/v1/export/tasks", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function getDataTask(id: string) {
+  return apiRequest<{ task: DataTaskDto }>(
+    `/api/v1/export/tasks/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function listDataTasks() {
+  return apiRequest<{ tasks: DataTaskDto[] }>("/api/v1/export/tasks");
+}
+
+export async function createImportTask(input: {
+  bundle: unknown;
+  conflict?: "skip" | "duplicate" | "overwrite";
+}) {
+  return apiRequest<{ task: DataTaskDto; result: ImportResult }>(
+    "/api/v1/import/tasks",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function downloadExportJson(id: string) {
+  const response = await fetch(
+    `/api/v1/export/tasks/${encodeURIComponent(id)}/manifest`,
+    { credentials: "same-origin" },
+  );
+  if (!response.ok) {
+    throw new ApiError(response.statusText, response.status);
+  }
+  return response.blob();
+}
+
+async function apiRequest<T>(
+  path: string,
+  init: RequestInit = {},
+  options: { authRequired?: boolean } = {},
+) {
   const headers = new Headers(init.headers);
   if (!(init.body instanceof FormData) && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
+  // The web app still consumes FlareMo's original snake_case DTOs for its
+  // /api/v1 attachment, share, relation, import, and export helpers. Keep
+  // that internal client explicit while external /api/v1 callers default to
+  // the current Memos-compatible wire.
+  if (path.startsWith("/api/v1/") && !headers.has("x-flaremo-wire")) {
+    headers.set("x-flaremo-wire", "legacy");
+  }
 
   const response = await fetch(path, {
     ...init,
+    credentials: "same-origin",
     headers,
   });
-
   const contentType = response.headers.get("content-type") ?? "";
   const isJson = contentType.includes("application/json");
 
@@ -223,11 +911,18 @@ async function apiRequest<T>(path: string, init: RequestInit = {}) {
       const body = (await response.json()) as { error?: { message?: string } };
       message = body.error?.message ?? message;
     }
+    if (
+      response.status === 401 &&
+      options.authRequired !== false &&
+      typeof window !== "undefined"
+    ) {
+      window.dispatchEvent(new Event(AUTHENTICATION_REQUIRED_EVENT));
+    }
     throw new ApiError(message, response.status);
   }
 
   if (!isJson) {
-    throw new ApiError("Cloudflare Access session required", 401);
+    throw new ApiError("The server returned an unexpected response.", 502);
   }
 
   return (await response.json()) as T;

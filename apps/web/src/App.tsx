@@ -1,41 +1,36 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  createRootRoute,
-  createRoute,
-  createRouter,
-  Outlet,
-  RouterProvider,
-} from "@tanstack/react-router";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   DownloadIcon,
-  FileIcon,
   LanguagesIcon,
   MenuIcon,
   SearchIcon,
+  SettingsIcon,
+  SparklesIcon,
   UploadIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import {
-  ApiError,
-  bindMemoAttachments,
-  createMemo,
-  createShare,
-  exportData,
-  getPublicShare,
-  hardDeleteMemo,
-  importData,
-  listMemoAttachments,
+  getMemoStats,
+  getTagHierarchy,
+  getVectorUsage,
   listMemos,
-  type Share,
-  trashMemo,
-  updateMemo,
-  uploadAttachment,
+  type MemoStatsResponse,
+  semanticSearchMemos,
 } from "@/api";
+import type { ExplorerView as ViewMode } from "@/components/flaremo-explorer";
 import { FlareMoExplorer } from "@/components/flaremo-explorer";
-import type { MemoView as ViewMode } from "@/components/flaremo-sidebar";
 import { MemoComposer } from "@/components/memo-composer";
 import { MemoList } from "@/components/memo-list";
+import { NotificationBell } from "@/components/notification-bell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -44,199 +39,349 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { Toaster } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { UpdateStatus } from "@/components/update-status";
+import { useDataTransfer } from "@/hooks/use-data-transfer";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
+import { useMemoMutations, viewToMemoState } from "@/hooks/use-memo-mutations";
+import { useNewMemoCapture } from "@/hooks/use-new-memo-capture";
 import { type TranslationKey, useI18n } from "@/i18n";
-import { extractTags, formatMemoTime, getAllTags } from "@/lib/memo";
+import {
+  enqueueMemoSubmission,
+  flushQueuedMemoSubmissions,
+  getNewMemoDraftId,
+  isBrowserOnline,
+  type MemoCaptureInput,
+} from "@/lib/local-memo-capture";
+import {
+  shouldContinueQueuedSubmissionAfterFailure,
+  shouldQueueAfterFailure,
+  validateMemoCaptureSubmission,
+} from "@/lib/memo-submission";
+import { cn } from "@/lib/utils";
+import { AppRoutes } from "@/router-tree";
+import { indexRoute, registerWorkspaceComponent } from "@/routes/index-route";
 
-function FlareMoApp() {
+const PAGE_SIZE = 30;
+const EMPTY_STATS: MemoStatsResponse = {
+  counts: { normal: 0, archived: 0, trashed: 0, total: 0 },
+  active_days: 0,
+  tags: [],
+  activity: [],
+};
+
+// Breaks the App ↔ router-tree import cycle: the route tree renders the
+// workspace through this registry instead of importing `@/App`. Module-eval
+// order guarantees registration before the router's first render.
+registerWorkspaceComponent(FlareMoApp);
+
+export function FlareMoApp() {
   const { t, toggleLocale } = useI18n();
-  const queryClient = useQueryClient();
-  const [view, setView] = useState<ViewMode>("all");
-  const [activeTag, setActiveTag] = useState<string | undefined>();
-  const [query, setQuery] = useState("");
-  const [sharesByMemo, setSharesByMemo] = useState<Map<string, Share>>(
-    new Map(),
+  const navigate = useNavigate({ from: "/" });
+  const search = indexRoute.useSearch();
+  const view = search.view ?? "all";
+  const activeTag = search.tag;
+  const untagged = Boolean(search.untagged);
+  const query = search.q ?? "";
+  const setView = (nextView: ViewMode) =>
+    void navigate({
+      replace: true,
+      search: (current) => ({ ...current, view: nextView }),
+    });
+  const setActiveTag = (tag: string | undefined) =>
+    void navigate({
+      replace: true,
+      search: (current) => ({ ...current, tag, untagged: undefined }),
+    });
+  const setUntagged = (next: boolean) =>
+    void navigate({
+      replace: true,
+      search: (current) => ({
+        ...current,
+        tag: undefined,
+        untagged: next ? true : undefined,
+      }),
+    });
+  const setQuery = (q: string) =>
+    void navigate({
+      replace: true,
+      search: (current) => ({
+        ...current,
+        q: q || undefined,
+        // A text query includes timeline and archived notes by default; trash
+        // remains available through the explicit `in:trash` search operator.
+        view: q.trim() ? "all" : view,
+      }),
+    });
+  const [timeZone] = useState(
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  );
+  const [newMemoDraftId] = useState(getNewMemoDraftId);
+  const capture = useNewMemoCapture({ draftId: newMemoDraftId });
+  const desktopSearchRef = useRef<HTMLInputElement>(null);
+  const mobileSearchRef = useRef<HTMLInputElement>(null);
+  const [isTimelineScrolled, setIsTimelineScrolled] = useState(false);
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
+  const isQueueFlushing = useRef(false);
+  const isQueueFlushPending = useRef(false);
+  const isCaptureSubmitting = useRef(false);
+  const restoredDraftNotified = useRef(false);
+  const [isCaptureSubmissionPending, setIsCaptureSubmissionPending] =
+    useState(false);
+  const debouncedQuery = useDebouncedValue(query.trim(), 250);
+  const isSearching = Boolean(debouncedQuery);
+  const [semanticMode, setSemanticMode] = useState(false);
+
+  const vectorUsageQuery = useQuery({
+    queryKey: ["vector-usage"],
+    queryFn: () => getVectorUsage(),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  // Semantic search is hidden when the plan has no budget for it (quota 0)
+  // or the capability itself is disabled server-side.
+  const semanticEnabled = useMemo(() => {
+    const plan = vectorUsageQuery.data?.plan;
+    if (!plan) return false;
+    const limit =
+      plan.user?.limits.semanticSearchQueriesPerMonth ??
+      plan.limits.semanticSearchQueriesPerMonth;
+    return typeof limit === "number" && limit > 0;
+  }, [vectorUsageQuery.data]);
+
+  const semanticResultsQuery = useQuery({
+    queryKey: ["semantic-search", debouncedQuery],
+    enabled: semanticMode && Boolean(debouncedQuery),
+    queryFn: () => semanticSearchMemos(debouncedQuery, 20),
+    retry: false,
+  });
+  const semanticMemos = useMemo(
+    () => semanticResultsQuery.data?.memos ?? [],
+    [semanticResultsQuery.data],
   );
 
-  const normalMemosQuery = useQuery({
-    queryKey: ["memos", "normal"],
-    queryFn: () => listMemos({ state: "normal" }),
+  useEffect(() => {
+    const focusSearch = () => {
+      const desktop = window.matchMedia("(min-width: 768px)").matches;
+      (desktop ? desktopSearchRef : mobileSearchRef).current?.focus();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const editable =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable);
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLocaleLowerCase() === "k"
+      ) {
+        event.preventDefault();
+        focusSearch();
+        return;
+      }
+      if (event.key === "/" && !editable) {
+        event.preventDefault();
+        focusSearch();
+        return;
+      }
+      // "c" jumps straight into the composer, like Memos' quick capture.
+      if (event.key.toLocaleLowerCase() === "c" && !editable) {
+        const composer = document.getElementById("flaremo-composer-input");
+        if (composer instanceof HTMLTextAreaElement) {
+          event.preventDefault();
+          composer.focus();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  const memosQuery = useInfiniteQuery({
+    queryKey: ["memos", view, debouncedQuery, activeTag, untagged],
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) =>
+      listMemos({
+        include_deleted: !isSearching && view === "trashed",
+        page_size: PAGE_SIZE,
+        page_token: pageParam,
+        q: debouncedQuery || undefined,
+        state: isSearching ? undefined : viewToMemoState(view),
+        tag: activeTag,
+        untagged,
+      }),
+    getNextPageParam: (lastPage) => lastPage.next_page_token,
     retry: false,
   });
-  const archivedMemosQuery = useQuery({
-    queryKey: ["memos", "archived"],
-    queryFn: () => listMemos({ state: "archived" }),
+  const statsQuery = useQuery({
+    queryKey: ["memo-stats", timeZone],
+    queryFn: () => getMemoStats(timeZone),
     retry: false,
   });
-  const trashedMemosQuery = useQuery({
-    queryKey: ["memos", "trashed"],
-    queryFn: () => listMemos({ state: "trashed", include_deleted: true }),
+  const tagHierarchyQuery = useQuery({
+    queryKey: ["tag-hierarchy"],
+    queryFn: () => getTagHierarchy(),
     retry: false,
   });
 
-  const normalMemos = normalMemosQuery.data?.memos ?? [];
-  const archivedMemos = archivedMemosQuery.data?.memos ?? [];
-  const trashedMemos = trashedMemosQuery.data?.memos ?? [];
-  const visibleMemos = useMemo(
-    () => [...normalMemos, ...archivedMemos],
-    [normalMemos, archivedMemos],
+  const memos = useMemo(
+    () => memosQuery.data?.pages.flatMap((page) => page.memos) ?? [],
+    [memosQuery.data],
   );
-  const attachmentKey = visibleMemos.map((memo) => memo.name).join(",");
-  const attachmentsQuery = useQuery({
-    enabled: visibleMemos.length > 0,
-    queryKey: ["attachments", attachmentKey],
-    retry: false,
-    queryFn: async () => {
-      const entries = await Promise.all(
-        visibleMemos.map(
-          async (memo) =>
-            [
-              memo.name,
-              (await listMemoAttachments(memo.name)).attachments,
-            ] as const,
-        ),
-      );
-      return new Map(entries);
-    },
+  const attachmentsByMemo = useMemo(
+    () =>
+      new Map(
+        memos.map((memo) => [memo.name, memo.attachments ?? []] as const),
+      ),
+    [memos],
+  );
+  const stats = statsQuery.data ?? EMPTY_STATS;
+
+  const {
+    createMemoAsync,
+    isCreatingMemo,
+    deleteTagMutation,
+    handleMutationError,
+    hardDeleteMutation,
+    invalidateWorkspace,
+    renameTagMutation,
+    restoreMutation,
+    sharesByMemo,
+    shareMutation,
+    trashMutation,
+    updateMutation,
+  } = useMemoMutations();
+
+  const { handleExport, handleImportFile } = useDataTransfer({
+    handleMutationError,
+    invalidateWorkspace,
   });
 
-  const invalidateMemos = () =>
-    queryClient.invalidateQueries({ queryKey: ["memos"] });
-  const invalidateAttachments = () =>
-    queryClient.invalidateQueries({ queryKey: ["attachments"] });
-  const handleMutationError = (error: Error) => {
-    if (
-      error instanceof ApiError &&
-      (error.status === 401 || error.status === 403)
-    ) {
-      toast.error(t("toast.accessRequired"));
+  const flushQueuedCaptures = useCallback(async () => {
+    if (!isBrowserOnline()) return;
+    // An "online" event that lands while a flush is running (e.g. the mount
+    // flush) must schedule another pass instead of being swallowed.
+    if (isQueueFlushing.current) {
+      isQueueFlushPending.current = true;
       return;
     }
-    toast.error(error.message);
+
+    isQueueFlushing.current = true;
+    try {
+      let submitted = 0;
+      let failed = 0;
+      do {
+        isQueueFlushPending.current = false;
+        const result = await flushQueuedMemoSubmissions(
+          (submission) => createMemoAsync(submission),
+          {
+            shouldContinueAfterFailure:
+              shouldContinueQueuedSubmissionAfterFailure,
+          },
+        );
+        submitted += result.submittedIds.length;
+        failed += result.failedIds.length;
+      } while (isQueueFlushPending.current && isBrowserOnline());
+      if (submitted > 0) {
+        toast.success(t("toast.queueSynced"));
+      }
+      if (failed > 0) {
+        toast.error(t("toast.queueNeedsAttention", { count: failed }));
+      }
+    } finally {
+      isQueueFlushing.current = false;
+    }
+  }, [createMemoAsync, t]);
+
+  useEffect(() => {
+    void flushQueuedCaptures();
+    const handleOnline = () => void flushQueuedCaptures();
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, [flushQueuedCaptures]);
+
+  useEffect(() => {
+    if (!capture.didRestoreStoredDraft || restoredDraftNotified.current) return;
+    restoredDraftNotified.current = true;
+    toast.success(t("toast.draftRestored"));
+  }, [capture.didRestoreStoredDraft, t]);
+
+  const handleCaptureSubmit = async (input: MemoCaptureInput) => {
+    if (isCaptureSubmitting.current) return;
+
+    isCaptureSubmitting.current = true;
+    setIsCaptureSubmissionPending(true);
+    const submission = {
+      ...input,
+      content: input.content || t("toast.untitledAttachment"),
+    };
+    try {
+      const validationError = validateMemoCaptureSubmission(submission, t);
+      if (validationError) {
+        handleMutationError(validationError);
+        throw validationError;
+      }
+
+      if (!isBrowserOnline()) {
+        const queued = await enqueueMemoSubmission(submission);
+        if (!queued) {
+          const error = new Error(t("toast.offlineStorageUnavailable"));
+          handleMutationError(error);
+          throw error;
+        }
+        await capture.discardDraft();
+        toast.success(t("toast.queuedForSync"));
+        return;
+      }
+
+      try {
+        await createMemoAsync(submission);
+        await capture.discardDraft();
+        toast.success(t("toast.saved"));
+      } catch (error) {
+        if (!shouldQueueAfterFailure(error)) {
+          handleMutationError(error);
+          throw error;
+        }
+
+        const queued = await enqueueMemoSubmission(submission);
+        if (!queued) {
+          handleMutationError(error);
+          throw error;
+        }
+        await capture.discardDraft();
+        toast.success(t("toast.queuedForSync"));
+      }
+    } finally {
+      isCaptureSubmitting.current = false;
+      setIsCaptureSubmissionPending(false);
+    }
   };
 
-  const createMutation = useMutation({
-    mutationFn: async (input: {
-      content: string;
-      visibility: Parameters<typeof createMemo>[0]["visibility"];
-      tags: string[];
-      files: File[];
-    }) => {
-      const memo = await createMemo({
-        content: input.content || t("toast.untitledAttachment"),
-        visibility: input.visibility,
-        payload: { tags: input.tags },
-        source: "web",
-      });
-      if (input.files.length > 0) {
-        const attachments = await Promise.all(
-          input.files.map((file) =>
-            uploadAttachment({ file, memo: memo.name }),
-          ),
-        );
-        await bindMemoAttachments(
-          memo.name,
-          attachments.map((attachment) => attachment.name),
-        );
-      }
-      return memo;
-    },
-    onSuccess: () => {
-      toast.success(t("toast.saved"));
-      void invalidateMemos();
-      void invalidateAttachments();
-    },
-    onError: handleMutationError,
-  });
-
-  const trashMutation = useMutation({
-    mutationFn: trashMemo,
-    onSuccess: () => {
-      toast.success(t("toast.movedToTrash"));
-      void invalidateMemos();
-    },
-    onError: handleMutationError,
-  });
-
-  const restoreMutation = useMutation({
-    mutationFn: (id: string) => updateMemo(id, { status: "normal" }),
-    onSuccess: () => {
-      toast.success(t("toast.restored"));
-      void invalidateMemos();
-    },
-    onError: handleMutationError,
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({
-      id,
-      input,
-    }: {
-      id: string;
-      input: Parameters<typeof updateMemo>[1];
-    }) => updateMemo(id, input),
-    onSuccess: () => {
-      toast.success(t("toast.updated"));
-      void invalidateMemos();
-    },
-    onError: handleMutationError,
-  });
-
-  const hardDeleteMutation = useMutation({
-    mutationFn: hardDeleteMemo,
-    onSuccess: () => {
-      toast.success(t("toast.deleted"));
-      void invalidateMemos();
-      void invalidateAttachments();
-    },
-    onError: handleMutationError,
-  });
-
-  const shareMutation = useMutation({
-    mutationFn: createShare,
-    onSuccess: (share) => {
-      setSharesByMemo((current) => new Map(current).set(share.memo, share));
-      toast.success(t("toast.shareCreated"));
-    },
-    onError: handleMutationError,
-  });
-
-  const importMutation = useMutation({
-    mutationFn: importData,
-    onSuccess: (result) => {
-      toast.success(t("toast.imported", { count: result.imported_memos }));
-      void invalidateMemos();
-      void invalidateAttachments();
-    },
-    onError: handleMutationError,
-  });
-
-  const allTags = useMemo(() => getAllTags(normalMemos), [normalMemos]);
-  const sourceMemos =
-    view === "trashed"
-      ? trashedMemos
-      : view === "archived"
-        ? archivedMemos
-        : normalMemos;
-  const filteredMemos = useMemo(
-    () =>
-      sourceMemos.filter((memo) => {
-        const textMatch = query.trim()
-          ? memo.content.toLowerCase().includes(query.trim().toLowerCase())
-          : true;
-        const tagMatch = activeTag
-          ? (memo.payload.tags ?? []).includes(activeTag)
-          : true;
-        return textMatch && tagMatch;
-      }),
-    [activeTag, query, sourceMemos],
-  );
-  const appShell = (
+  const renderExplorer = (importInputId: string, onNavigate?: () => void) => (
     <FlareMoExplorer
       activeTag={activeTag}
       activeView={view}
-      archivedCount={archivedMemos.length}
+      headerAction={
+        <div className="mr-8 flex items-center gap-1 lg:mr-0">
+          <NotificationBell />
+          <UpdateStatus />
+          <Button
+            asChild
+            aria-label={t("auth.accountTitle")}
+            size="icon-sm"
+            variant="ghost"
+          >
+            <Link
+              onClick={onNavigate}
+              title={t("auth.accountTitle")}
+              to="/account"
+            >
+              <SettingsIcon />
+            </Link>
+          </Button>
+        </div>
+      }
       footer={
         <div className="flex items-center gap-1 text-muted-foreground">
           <Button
@@ -253,201 +398,300 @@ function FlareMoApp() {
           <Button
             aria-label={t("common.export")}
             size="icon-sm"
+            title={t("common.export")}
             variant="ghost"
-            onClick={async () => {
-              const bundle = await exportData();
-              const blob = new Blob([JSON.stringify(bundle, null, 2)], {
-                type: "application/json",
-              });
-              const url = URL.createObjectURL(blob);
-              const anchor = document.createElement("a");
-              anchor.href = url;
-              anchor.download = `flaremo-export-${new Date().toISOString()}.json`;
-              anchor.click();
-              URL.revokeObjectURL(url);
-            }}
+            onClick={() => void handleExport()}
           >
             <DownloadIcon />
           </Button>
           <Button asChild size="icon-sm" variant="ghost">
             <label
               aria-label={t("common.import")}
-              htmlFor="flaremo-import-file"
+              htmlFor={importInputId}
+              title={t("common.import")}
             >
               <UploadIcon />
               <Input
                 accept="application/json"
                 className="hidden"
-                id="flaremo-import-file"
+                id={importInputId}
                 type="file"
                 onChange={async (event) => {
                   const file = event.target.files?.[0];
                   event.target.value = "";
                   if (!file) return;
-                  const text = await file.text();
-                  importMutation.mutate(JSON.parse(text) as unknown);
+                  try {
+                    const text = await file.text();
+                    void handleImportFile(JSON.parse(text) as unknown);
+                  } catch {
+                    toast.error(t("toast.invalidImport"));
+                  }
                 }}
               />
             </label>
           </Button>
         </div>
       }
-      memoCount={normalMemos.length}
-      memos={visibleMemos}
-      tags={allTags}
-      trashedCount={trashedMemos.length}
+      stats={stats}
+      hierarchy={tagHierarchyQuery.data?.tags ?? []}
+      untagged={untagged}
+      onDeleteTag={(tag) => deleteTagMutation.mutate(tag)}
+      onRenameTag={(from, to) => renameTagMutation.mutate({ from, to })}
       onTagChange={setActiveTag}
+      onUntaggedChange={setUntagged}
       onViewChange={setView}
+      onNavigate={onNavigate}
     />
   );
 
   return (
-    <TooltipProvider>
-      <div className="h-svh overflow-hidden bg-background">
-        <div className="mx-auto flex h-full w-full max-w-[950px]">
-          <div className="no-scrollbar hidden h-full w-[312px] shrink-0 overflow-y-auto border-r bg-background lg:block">
-            {appShell}
-          </div>
-          <div className="flex h-full min-w-0 flex-1 flex-col">
-            <header className="z-20 shrink-0 bg-background/95 backdrop-blur">
-              <div className="flex h-14 items-center gap-2 px-5 lg:px-3">
-                <Sheet>
-                  <SheetTrigger asChild>
-                    <Button
-                      aria-label={t("sidebar.toggle")}
-                      className="lg:hidden"
-                      size="icon-sm"
-                      variant="ghost"
-                    >
-                      <MenuIcon />
-                    </Button>
-                  </SheetTrigger>
-                  <SheetContent className="w-[312px] p-0" side="left">
-                    <SheetTitle className="sr-only">
-                      {t("sidebar.title")}
-                    </SheetTitle>
-                    {appShell}
-                  </SheetContent>
-                </Sheet>
-                <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                  <span className="hidden text-muted-foreground sm:inline">
-                    /
-                  </span>
-                  <div className="truncate px-1.5 py-1 text-sm font-semibold">
-                    {viewTitle(view, t)}
+    <div className="h-svh overflow-hidden bg-background">
+      <div className="mx-auto flex h-full w-full max-w-[950px]">
+        <div className="no-scrollbar hidden h-full w-[312px] shrink-0 overflow-y-auto border-r bg-background lg:block">
+          {renderExplorer("flaremo-import-file-desktop")}
+        </div>
+        <div className="flex h-full min-w-0 flex-1 flex-col">
+          <header
+            className={cn(
+              "z-20 shrink-0 border-b bg-background/90 backdrop-blur-md motion-safe:transition-[border-color,box-shadow] motion-safe:duration-200",
+              isTimelineScrolled
+                ? "border-border shadow-xs"
+                : "border-transparent",
+            )}
+          >
+            <div className="flex h-14 items-center gap-2 px-5 lg:px-3">
+              <Sheet open={mobileSheetOpen} onOpenChange={setMobileSheetOpen}>
+                <SheetTrigger asChild>
+                  <Button
+                    aria-label={t("sidebar.toggle")}
+                    className="lg:hidden"
+                    size="icon-sm"
+                    variant="ghost"
+                  >
+                    <MenuIcon />
+                  </Button>
+                </SheetTrigger>
+                <SheetContent
+                  className="w-[312px] overflow-hidden p-0"
+                  side="left"
+                >
+                  <SheetTitle className="sr-only">
+                    {t("sidebar.title")}
+                  </SheetTitle>
+                  <div
+                    className="no-scrollbar h-full overflow-y-auto overscroll-contain"
+                    data-testid="mobile-sidebar-scroll"
+                  >
+                    {renderExplorer("flaremo-import-file-mobile", () =>
+                      setMobileSheetOpen(false),
+                    )}
                   </div>
+                </SheetContent>
+              </Sheet>
+              <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                <span className="hidden text-muted-foreground sm:inline">
+                  /
+                </span>
+                <div className="truncate px-1.5 py-1 text-sm font-semibold">
+                  {query.trim() ? t("search.results") : viewTitle(view, t)}
+                </div>
+              </div>
+              <SearchBox
+                className="hidden w-[243px] md:block"
+                inputRef={desktopSearchRef}
+                onToggleSemantic={
+                  semanticEnabled
+                    ? () => setSemanticMode((value) => !value)
+                    : undefined
+                }
+                query={query}
+                semanticMode={semanticMode}
+                setQuery={setQuery}
+                t={t}
+              />
+            </div>
+          </header>
+          <main
+            className="mx-auto min-h-0 w-full max-w-[640px] flex-1 overflow-y-auto px-5 pt-1 pb-8 lg:px-3"
+            onScroll={(event) =>
+              setIsTimelineScrolled(event.currentTarget.scrollTop > 4)
+            }
+          >
+            <SearchBox
+              className="mb-3 md:hidden motion-safe:animate-rise"
+              inputRef={mobileSearchRef}
+              onToggleSemantic={
+                semanticEnabled
+                  ? () => setSemanticMode((value) => !value)
+                  : undefined
+              }
+              query={query}
+              semanticMode={semanticMode}
+              setQuery={setQuery}
+              t={t}
+            />
+            <div className="flex flex-col gap-3">
+              {view === "all" && (
+                <MemoComposer
+                  draft={capture.draft}
+                  isPending={isCreatingMemo || isCaptureSubmissionPending}
+                  onDraftChange={capture.updateDraft}
+                  onSubmit={handleCaptureSubmit}
+                />
+              )}
+              {(activeTag || query.trim()) && (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground motion-safe:animate-rise">
+                  {query.trim() && (
+                    <span className="rounded-md bg-muted px-2 py-1">
+                      {t("search.globalScope")}
+                    </span>
+                  )}
                   {activeTag && (
                     <button
-                      className="truncate rounded-md px-1.5 py-1 text-sm text-muted-foreground motion-safe:transition-colors hover:bg-muted"
+                      className="rounded-md bg-muted px-2 py-1 motion-safe:transition-colors hover:text-foreground"
                       type="button"
                       onClick={() => setActiveTag(undefined)}
                     >
                       #{activeTag}
                     </button>
                   )}
+                  <button
+                    className="rounded-md px-2 py-1 motion-safe:transition-colors hover:bg-muted hover:text-foreground"
+                    type="button"
+                    onClick={() => {
+                      setActiveTag(undefined);
+                      setQuery("");
+                    }}
+                  >
+                    {t("common.clearFilters")}
+                  </button>
                 </div>
-                <div className="relative hidden w-[243px] md:block">
-                  <SearchIcon className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    className="h-9 rounded-xl border-0 bg-muted pl-9 shadow-none focus-visible:ring-1"
-                    placeholder={t("common.search")}
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                  />
-                </div>
-              </div>
-            </header>
-            <main className="mx-auto min-h-0 w-full max-w-[640px] flex-1 overflow-y-auto px-5 pb-8 lg:px-3">
-              <div className="mb-3 md:hidden motion-safe:animate-[flaremo-rise_160ms_ease-out_both]">
-                <div className="relative">
-                  <SearchIcon className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    className="h-9 rounded-xl border-0 bg-muted pl-9 shadow-none focus-visible:ring-1"
-                    placeholder={t("common.search")}
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                  />
-                </div>
-              </div>
-              <div className="flex flex-col gap-3">
-                {view === "all" && (
-                  <MemoComposer
-                    isPending={createMutation.isPending}
-                    onSubmit={({ content, visibility, tags, files }) =>
-                      createMutation.mutate({
-                        content,
-                        visibility,
-                        tags,
-                        files,
-                      })
-                    }
-                  />
-                )}
-                {(activeTag || query.trim()) && (
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground motion-safe:animate-[flaremo-rise_140ms_ease-out_both]">
-                    {activeTag && (
-                      <button
-                        className="rounded-md bg-muted px-2 py-1 motion-safe:transition-colors hover:text-foreground"
-                        type="button"
-                        onClick={() => setActiveTag(undefined)}
-                      >
-                        #{activeTag}
-                      </button>
-                    )}
-                    <button
-                      className="rounded-md px-2 py-1 motion-safe:transition-colors hover:bg-muted hover:text-foreground"
-                      type="button"
-                      onClick={() => {
-                        setActiveTag(undefined);
-                        setQuery("");
-                      }}
-                    >
-                      {t("common.clearFilters")}
-                    </button>
-                  </div>
-                )}
-                <MemoList
-                  attachmentsByMemo={attachmentsQuery.data ?? new Map()}
-                  hasError={
-                    normalMemosQuery.isError ||
-                    archivedMemosQuery.isError ||
-                    trashedMemosQuery.isError
-                  }
-                  isLoading={
-                    normalMemosQuery.isLoading ||
-                    archivedMemosQuery.isLoading ||
-                    trashedMemosQuery.isLoading
-                  }
-                  memos={filteredMemos}
-                  sharesByMemo={sharesByMemo}
-                  onArchive={(id) => {
-                    const memo = visibleMemos.find(
-                      (item) => item.name === id || item.id === id,
-                    );
-                    updateMutation.mutate({
-                      id,
-                      input: {
-                        status:
-                          memo?.state === "archived" ? "normal" : "archived",
-                      },
-                    });
-                  }}
-                  onHardDelete={(id) => hardDeleteMutation.mutate(id)}
-                  onPin={(id, pinned) =>
-                    updateMutation.mutate({ id, input: { pinned } })
-                  }
-                  onRestore={(id) => restoreMutation.mutate(id)}
-                  onShare={(id) => shareMutation.mutate(id)}
-                  onTrash={(id) => trashMutation.mutate(id)}
-                  onUpdate={(id, input) => updateMutation.mutate({ id, input })}
-                />
-              </div>
-            </main>
-          </div>
+              )}
+              {query.trim() && !semanticMode && (
+                <p className="-mt-1 text-xs text-muted-foreground">
+                  {t("search.syntaxHint")}
+                </p>
+              )}
+              <MemoList
+                attachmentsByMemo={attachmentsByMemo}
+                emptyDescription={
+                  semanticMode && debouncedQuery
+                    ? t("search.semanticEmpty")
+                    : undefined
+                }
+                hasError={
+                  semanticMode
+                    ? semanticResultsQuery.isError
+                    : memosQuery.isError
+                }
+                hasNextPage={
+                  semanticMode ? false : Boolean(memosQuery.hasNextPage)
+                }
+                isFetchingNextPage={
+                  semanticMode ? false : memosQuery.isFetchingNextPage
+                }
+                isLoading={
+                  semanticMode
+                    ? semanticResultsQuery.isLoading
+                    : memosQuery.isLoading
+                }
+                memos={semanticMode ? semanticMemos : memos}
+                searchQuery={debouncedQuery || undefined}
+                sharesByMemo={sharesByMemo}
+                onArchive={(id) => {
+                  const source = semanticMode ? semanticMemos : memos;
+                  const memo = source.find(
+                    (item) => item.name === id || item.id === id,
+                  );
+                  updateMutation.mutate({
+                    id,
+                    input: {
+                      status:
+                        memo?.state === "archived" ? "normal" : "archived",
+                    },
+                  });
+                }}
+                onHardDelete={async (id) => {
+                  await hardDeleteMutation.mutateAsync(id);
+                }}
+                onLoadMore={() => {
+                  if (!semanticMode) void memosQuery.fetchNextPage();
+                }}
+                onPin={(id, pinned) =>
+                  updateMutation.mutate({ id, input: { pinned } })
+                }
+                onRestore={(id) => restoreMutation.mutate(id)}
+                onRetry={() => {
+                  if (semanticMode) void semanticResultsQuery.refetch();
+                  else void memosQuery.refetch();
+                }}
+                onShare={(id) => shareMutation.mutate(id)}
+                onTagClick={setActiveTag}
+                onTrash={(id) => trashMutation.mutate(id)}
+                onUpdate={async (id, input) => {
+                  await updateMutation.mutateAsync({ id, input });
+                }}
+              />
+            </div>
+          </main>
         </div>
       </div>
-      <Toaster />
-    </TooltipProvider>
+    </div>
+  );
+}
+
+function SearchBox({
+  className,
+  inputRef,
+  query,
+  semanticMode = false,
+  onToggleSemantic,
+  setQuery,
+  t,
+}: {
+  className: string;
+  inputRef?: RefObject<HTMLInputElement | null>;
+  query: string;
+  semanticMode?: boolean;
+  onToggleSemantic?: () => void;
+  setQuery: (value: string) => void;
+  t: (key: TranslationKey) => string;
+}) {
+  return (
+    <div className={className}>
+      <div className="relative">
+        <SearchIcon className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          aria-label={t("common.search")}
+          className="h-9 rounded-xl border-0 bg-muted pr-11 pl-9 shadow-none transition-[box-shadow,background-color] focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-flame-400/30"
+          placeholder={
+            semanticMode
+              ? t("search.semanticPlaceholder")
+              : t("search.placeholder")
+          }
+          ref={inputRef}
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        {onToggleSemantic && (
+          <button
+            aria-label={t("search.semanticToggle")}
+            aria-pressed={semanticMode}
+            className={cn(
+              "absolute top-1/2 right-2 -translate-y-1/2 rounded-md p-1 transition-colors",
+              semanticMode
+                ? "bg-flame-500/15 text-flame-500"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+            title={t("search.semanticToggle")}
+            type="button"
+            onClick={onToggleSemantic}
+          >
+            <SparklesIcon className="size-4" />
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -462,106 +706,6 @@ function viewTitle(view: ViewMode, t: (key: TranslationKey) => string) {
   }
 }
 
-const rootRoute = createRootRoute({
-  component: () => <Outlet />,
-});
-
-const indexRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/",
-  component: FlareMoApp,
-});
-
-function PublicSharePage() {
-  const { locale, t } = useI18n();
-  const { token } = shareRoute.useParams();
-  const shareQuery = useQuery({
-    queryKey: ["public-share", token],
-    queryFn: () => getPublicShare(token),
-  });
-  const share = shareQuery.data;
-  const tags = share
-    ? (share.memo.payload.tags ?? extractTags(share.memo.content))
-    : [];
-
-  return (
-    <div className="min-h-svh bg-background px-4 py-6">
-      <main className="mx-auto flex w-full max-w-2xl flex-col gap-4">
-        <header className="border-b pb-4">
-          <div className="font-heading text-lg font-semibold">FlareMo</div>
-          <div className="text-sm text-muted-foreground">
-            {t("share.title")}
-          </div>
-        </header>
-        {shareQuery.isLoading && (
-          <div className="rounded-md border p-6 text-sm text-muted-foreground">
-            {t("common.loading")}
-          </div>
-        )}
-        {shareQuery.isError && (
-          <div className="rounded-md border p-6 text-sm text-muted-foreground">
-            {t("share.unavailable")}
-          </div>
-        )}
-        {share && (
-          <article className="rounded-md border bg-card p-5 shadow-sm">
-            <div className="mb-4 text-sm text-muted-foreground">
-              {formatMemoTime(share.memo.display_time, locale)}
-            </div>
-            <div className="whitespace-pre-wrap text-base leading-7">
-              {share.memo.content}
-            </div>
-            {tags.length > 0 && (
-              <div className="mt-4 flex flex-wrap gap-2">
-                {tags.map((tag) => (
-                  <span
-                    className="rounded-md border px-2 py-1 text-xs text-muted-foreground"
-                    key={tag}
-                  >
-                    #{tag}
-                  </span>
-                ))}
-              </div>
-            )}
-            {share.attachments.length > 0 && (
-              <div className="mt-5 flex flex-col gap-2">
-                {share.attachments.map((attachment) => (
-                  <a
-                    className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
-                    href={attachment.download_url}
-                    key={attachment.name}
-                  >
-                    <FileIcon />
-                    <span className="min-w-0 flex-1 truncate">
-                      {attachment.filename}
-                    </span>
-                  </a>
-                ))}
-              </div>
-            )}
-          </article>
-        )}
-      </main>
-    </div>
-  );
-}
-
-const shareRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/share/$token",
-  component: PublicSharePage,
-});
-
-const router = createRouter({
-  routeTree: rootRoute.addChildren([indexRoute, shareRoute]),
-});
-
-declare module "@tanstack/react-router" {
-  interface Register {
-    router: typeof router;
-  }
-}
-
 export default function App() {
-  return <RouterProvider router={router} />;
+  return <AppRoutes />;
 }

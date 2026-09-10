@@ -3,15 +3,18 @@ import type {
   ListMemosResponse,
   MemoDto,
   MemoRelationDto,
+  MemoRevisionDto,
   ShareDto,
 } from "@flaremo/contracts";
 import type {
   AttachmentRow,
   MemoPayload,
+  MemoRevisionRow,
   MemoRow,
   ShareRow,
   UserRow,
 } from "@flaremo/db";
+import { canEditMemo } from "@flaremo/domain";
 
 type MemoRelationRow = {
   memoId: string;
@@ -20,7 +23,11 @@ type MemoRelationRow = {
   createdAt: string;
 };
 
-export function memoToDto(memo: MemoRow, user: UserRow): MemoDto {
+export function memoToDto(
+  memo: MemoRow,
+  _user: UserRow,
+  creatorName?: string,
+): MemoDto {
   return {
     name: memo.id,
     id: memo.id.replace(/^memos\//, ""),
@@ -32,7 +39,8 @@ export function memoToDto(memo: MemoRow, user: UserRow): MemoDto {
     create_time: memo.createdAt,
     update_time: memo.updatedAt,
     display_time: memo.createdAt,
-    creator: user.id,
+    creator: memo.userId,
+    ...(creatorName ? { creator_name: creatorName } : {}),
   };
 }
 
@@ -44,10 +52,13 @@ export function attachmentToDto(attachment: AttachmentRow): AttachmentDto {
     filename: attachment.filename,
     content_type: attachment.contentType,
     size: attachment.size,
+    state: attachment.state,
+    etag: attachment.etag,
     payload: attachment.payload ?? {},
     create_time: attachment.createdAt,
     update_time: attachment.updatedAt,
     download_url: `/api/v1/${attachment.id}/blob`,
+    preview_url: `/api/v1/${attachment.id}/blob?disposition=inline`,
   };
 }
 
@@ -68,16 +79,44 @@ export function shareToDto(share: ShareRow): ShareDto {
     token: share.token,
     expires_at: share.expiresAt,
     create_time: share.createdAt,
+    update_time: share.updatedAt,
+    revoked_at: share.revokedAt,
+  };
+}
+
+export function memoRevisionToDto(revision: MemoRevisionRow): MemoRevisionDto {
+  return {
+    name: revision.id,
+    id: revision.id.replace(/^revisions\//, ""),
+    memo: revision.memoId,
+    content: revision.content,
+    visibility: revision.visibility,
+    payload: revision.payload,
+    create_time: revision.createdAt,
   };
 }
 
 export function memosToListResponse(input: {
+  attachmentsByMemo?: ReadonlyMap<string, AttachmentRow[]>;
+  creatorNames?: ReadonlyMap<string, string>;
   memos: MemoRow[];
   user: UserRow;
   nextPageToken?: string;
 }): ListMemosResponse {
   return {
-    memos: input.memos.map((memo) => memoToDto(memo, input.user)),
+    memos: input.memos.map((memo) => ({
+      ...memoToDto(memo, input.user, input.creatorNames?.get(memo.userId)),
+      // Single source of truth for the edit/manage rule (see canEditMemo);
+      // clients must not re-derive team permissions locally.
+      can_manage: canEditMemo(input.user, memo),
+      ...(input.attachmentsByMemo
+        ? {
+            attachments: (input.attachmentsByMemo.get(memo.id) ?? []).map(
+              attachmentToDto,
+            ),
+          }
+        : {}),
+    })),
     ...(input.nextPageToken ? { next_page_token: input.nextPageToken } : {}),
   };
 }

@@ -1,4 +1,12 @@
 import { z } from "zod";
+import {
+  exportMemoryRelationSchema,
+  exportMemoryResourceLinkSchema,
+  exportMemoryRevisionSchema,
+  importMemorySchema,
+  memoryDtoSchema,
+} from "./memory";
+import { memoSearchScopes } from "./search-query";
 
 export const memoVisibilitySchema = z.enum(["private", "protected", "public"]);
 export const memoStatusSchema = z.enum([
@@ -8,6 +16,14 @@ export const memoStatusSchema = z.enum([
   "deleted",
 ]);
 export const memoRelationTypeSchema = z.enum(["reference", "comment"]);
+export const attachmentStateSchema = z.enum(["ready", "deleting", "missing"]);
+export const memoOrderBySchema = z.enum([
+  "created_at asc",
+  "created_at desc",
+  "updated_at asc",
+  "updated_at desc",
+]);
+export const memoSearchScopeSchema = z.enum(memoSearchScopes);
 
 export const memoPropertySchema = z
   .object({
@@ -24,6 +40,9 @@ export const memoPayloadSchema = z
     tags: z.array(z.string()).optional(),
     property: memoPropertySchema.optional(),
     location: z.unknown().optional(),
+    // Memos-compatible payloads may already carry arbitrary client ids. The
+    // domain layer only promotes a non-empty value up to 128 characters to
+    // the internal idempotency key, without rejecting existing clients.
     client_id: z.string().optional(),
   })
   .passthrough();
@@ -51,12 +70,53 @@ export const updateMemoSchema = z
 export const listMemosQuerySchema = z.object({
   page_size: z.coerce.number().int().min(1).max(100).default(30),
   page_token: z.string().optional(),
-  order_by: z.string().default("created_at desc"),
+  order_by: memoOrderBySchema.default("created_at desc"),
   state: memoStatusSchema.optional(),
-  q: z.string().optional(),
+  visibility: memoVisibilitySchema.optional(),
+  q: z
+    .string()
+    .optional()
+    .describe(
+      "Full-text terms plus optional filters: has:attachment, is:pinned, before:YYYY-MM-DD, after:YYYY-MM-DD, and in:timeline|archive|trash. Without state or in:, queries search timeline and archived memos; use in:trash for trashed memos. Date filters use memo creation dates in UTC; after is inclusive and before is exclusive. Invalid filter-like terms remain text.",
+    ),
   tag: z.string().optional(),
+  /** Only include memos that have no tags. Mutually exclusive with `tag`. */
+  untagged: z.coerce.boolean().optional(),
+  /** Current Memos API CEL expression. Legacy `q` remains independent. */
+  filter: z.string().trim().max(4_096).optional(),
   include_deleted: z.coerce.boolean().default(false),
 });
+
+export const memoStatsQuerySchema = z.object({
+  time_zone: z.string().trim().min(1).max(100).default("UTC"),
+});
+
+export const dailyReviewQuerySchema = z.object({
+  /** Local date in YYYY-MM-DD; the server matches creation month-day. */
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  /** Minutes the viewer's local time is ahead of UTC (e.g. 480 for UTC+8). */
+  tzOffset: z.coerce.number().int().min(-840).max(840).default(0),
+});
+
+export const randomMemoQuerySchema = z.object({
+  /** Comma-separated memo resource names already walked through. */
+  exclude: z.string().trim().max(64_000).optional(),
+});
+
+export const walkNextQuerySchema = z.object({
+  memoId: z.string().trim().min(1).max(200),
+  exclude: z.string().trim().max(64_000).optional(),
+});
+
+export const relatedMemosQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(10).default(5),
+});
+
+export const reviewWalkViaSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("tag"), tag: z.string() }),
+  z.object({ type: z.literal("relation") }),
+  z.object({ type: z.literal("jump") }),
+]);
 
 export const attachmentDtoSchema = z.object({
   name: z.string(),
@@ -65,10 +125,13 @@ export const attachmentDtoSchema = z.object({
   filename: z.string(),
   content_type: z.string().nullable(),
   size: z.number().int().nonnegative(),
+  state: attachmentStateSchema,
+  etag: z.string().nullable(),
   payload: z.record(z.string(), z.unknown()),
   create_time: z.string(),
   update_time: z.string(),
   download_url: z.string(),
+  preview_url: z.string(),
 });
 
 export const memoDtoSchema = z.object({
@@ -83,12 +146,38 @@ export const memoDtoSchema = z.object({
   update_time: z.string(),
   display_time: z.string(),
   creator: z.string(),
+  creator_name: z.string().optional(),
+  // Server-computed edit/manage permission for the requesting user, so
+  // clients never re-derive the team permission rules locally.
+  can_manage: z.boolean().optional(),
   attachments: z.array(attachmentDtoSchema).optional(),
 });
 
 export const listMemosResponseSchema = z.object({
   memos: z.array(memoDtoSchema),
   next_page_token: z.string().optional(),
+});
+
+export const memoStatsResponseSchema = z.object({
+  counts: z.object({
+    normal: z.number().int().nonnegative(),
+    archived: z.number().int().nonnegative(),
+    trashed: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  }),
+  active_days: z.number().int().nonnegative(),
+  tags: z.array(
+    z.object({
+      name: z.string(),
+      count: z.number().int().positive(),
+    }),
+  ),
+  activity: z.array(
+    z.object({
+      date: z.string(),
+      count: z.number().int().nonnegative(),
+    }),
+  ),
 });
 
 export const listAttachmentsQuerySchema = z.object({
@@ -133,10 +222,55 @@ export const shareDtoSchema = z.object({
   token: z.string(),
   expires_at: z.string().nullable(),
   create_time: z.string(),
+  update_time: z.string(),
+  revoked_at: z.string().nullable(),
 });
 
 export const createShareSchema = z.object({
   expires_at: z.string().datetime().nullable().optional(),
+});
+
+export const listMemoSharesResponseSchema = z.object({
+  shares: z.array(shareDtoSchema),
+});
+
+export const memoRevisionDtoSchema = z.object({
+  name: z.string(),
+  id: z.string(),
+  memo: z.string(),
+  content: z.string(),
+  visibility: memoVisibilitySchema,
+  payload: memoPayloadSchema,
+  create_time: z.string(),
+});
+
+export const listMemoRevisionsResponseSchema = z.object({
+  revisions: z.array(memoRevisionDtoSchema),
+});
+
+export const restoreMemoRevisionSchema = z.object({
+  revision: z.string(),
+});
+
+export const memoRelationContextSchema = z.object({
+  relation: memoRelationDtoSchema,
+  memo: memoDtoSchema,
+});
+
+export const memoRelationContextResponseSchema = z.object({
+  relations: z.array(memoRelationContextSchema),
+  backlinks: z.array(memoRelationContextSchema),
+});
+
+export const memoContextResponseSchema = z.object({
+  memo: memoDtoSchema,
+  can_manage: z.boolean(),
+  attachments: z.array(attachmentDtoSchema),
+  shares: z.array(shareDtoSchema),
+  relations: z.array(memoRelationContextSchema),
+  backlinks: z.array(memoRelationContextSchema),
+  revisions: z.array(memoRevisionDtoSchema),
+  memories: z.array(memoryDtoSchema),
 });
 
 export const publicShareDtoSchema = z.object({
@@ -146,41 +280,226 @@ export const publicShareDtoSchema = z.object({
 });
 
 export const exportAttachmentSchema = attachmentDtoSchema
-  .omit({ download_url: true })
+  .omit({ download_url: true, preview_url: true })
   .extend({
-    data_base64: z.string().optional(),
+    data_base64: z.string().max(48_000_000).optional(),
   });
 
+const importAttachmentSchema = exportAttachmentSchema.partial({
+  state: true,
+  etag: true,
+});
+
+const importShareSchema = shareDtoSchema.partial({
+  update_time: true,
+  revoked_at: true,
+});
+
 export const importBundleSchema = z.object({
-  version: z.literal(1).default(1),
-  memos: z.array(
-    memoDtoSchema.pick({
-      name: true,
-      content: true,
-      visibility: true,
-      state: true,
-      pinned: true,
-      payload: true,
-    }),
-  ),
-  attachments: z.array(exportAttachmentSchema).default([]),
-  relations: z.array(memoRelationDtoSchema).default([]),
-  shares: z.array(shareDtoSchema).default([]),
+  version: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(1),
+  memos: z
+    .array(
+      memoDtoSchema
+        .pick({
+          name: true,
+          content: true,
+          visibility: true,
+          state: true,
+          pinned: true,
+          payload: true,
+          create_time: true,
+          update_time: true,
+          display_time: true,
+        })
+        .partial({
+          create_time: true,
+          update_time: true,
+          display_time: true,
+        })
+        .extend({ source: z.string().max(64).optional() }),
+    )
+    .max(50_000),
+  attachments: z.array(importAttachmentSchema).max(5_000).default([]),
+  relations: z.array(memoRelationDtoSchema).max(100_000).default([]),
+  shares: z.array(importShareSchema).max(10_000).default([]),
+  memories: z.array(importMemorySchema).max(50_000).default([]),
+  memory_revisions: z
+    .array(exportMemoryRevisionSchema)
+    .max(200_000)
+    .default([]),
+  memory_relations: z
+    .array(exportMemoryRelationSchema)
+    .max(100_000)
+    .default([]),
+  memory_resource_links: z
+    .array(exportMemoryResourceLinkSchema)
+    .max(100_000)
+    .default([]),
   exported_at: z.string().optional(),
+});
+
+export const importOptionsSchema = z.object({
+  conflict: z.enum(["skip", "duplicate", "overwrite"]).default("duplicate"),
 });
 
 export const importResultSchema = z.object({
   imported_memos: z.number().int().nonnegative(),
+  skipped_memos: z.number().int().nonnegative(),
+  overwritten_memos: z.number().int().nonnegative(),
   imported_attachments: z.number().int().nonnegative(),
   imported_relations: z.number().int().nonnegative(),
   imported_shares: z.number().int().nonnegative(),
+  imported_memories: z.number().int().nonnegative().default(0),
+});
+
+export const dataTaskStatusSchema = z.enum([
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "expired",
+]);
+
+export const dataTaskDtoSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["export", "import"]),
+  status: dataTaskStatusSchema,
+  phase: z.string(),
+  progress_done: z.number().int().nonnegative(),
+  progress_total: z.number().int().nonnegative(),
+  error_code: z.string().nullable(),
+  error_message: z.string().nullable(),
+  expires_at: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  completed_at: z.string().nullable(),
+});
+
+export const dataTaskListResponseSchema = z.object({
+  tasks: z.array(dataTaskDtoSchema),
+});
+
+export const createDataTaskResponseSchema = z.object({
+  task: dataTaskDtoSchema,
+});
+
+export const createImportTaskRequestSchema = z.object({
+  bundle: importBundleSchema,
+  conflict: importOptionsSchema.shape.conflict.optional(),
+});
+
+export const exportManifestSchema = z.object({
+  format_version: z.number().int(),
+  exported_at: z.string(),
+  counts: z.object({
+    memos: z.number().int().nonnegative(),
+    attachments: z.number().int().nonnegative(),
+    relations: z.number().int().nonnegative(),
+    shares: z.number().int().nonnegative(),
+  }),
+  data_chunks: z.array(
+    z.object({
+      kind: z.enum(["memos", "attachments", "relations", "shares", "settings"]),
+      key: z.string(),
+      record_count: z.number().int().nonnegative(),
+    }),
+  ),
+  attachments: z.array(
+    z.object({
+      id: z.string(),
+      filename: z.string(),
+      content_type: z.string().nullable(),
+      size: z.number().int().nonnegative(),
+    }),
+  ),
+});
+
+export const exportManifestResponseSchema = exportManifestSchema;
+
+export const tagHierarchyNodeSchema: z.ZodType<{
+  name: string;
+  count: number;
+  children: z.infer<typeof tagHierarchyNodeSchema>[];
+}> = z.lazy(() =>
+  z.object({
+    name: z.string(),
+    count: z.number().int().nonnegative(),
+    children: z.array(tagHierarchyNodeSchema),
+  }),
+);
+
+export const tagHierarchyResponseSchema = z.object({
+  tags: z.array(tagHierarchyNodeSchema),
+});
+
+export const renameTagRequestSchema = z.object({
+  /** Source canonical tag path, e.g. `工作` or `工作/项目A`. */
+  from: z.string().trim().min(1).max(200),
+  /** Destination canonical tag path, e.g. `知识/工作` or `工作`. */
+  to: z.string().trim().min(1).max(200),
+});
+
+export const renameTagResponseSchema = z.object({
+  renamed: z.number().int().nonnegative(),
+});
+
+export const deleteTagResponseSchema = z.object({
+  removed: z.number().int().nonnegative(),
+});
+
+export const listNotificationsQuerySchema = z.object({
+  page_size: z.coerce.number().int().min(1).max(100).default(50),
+  page_token: z.string().optional(),
+});
+
+export const updateNotificationSchema = z.object({
+  status: z.enum(["unread", "archived"]),
+});
+
+export const appNotificationDtoSchema = z.object({
+  name: z.string(),
+  type: z.enum(["memo_comment", "memo_mention", "daily_review"]),
+  status: z.enum(["unread", "archived"]),
+  memo: z.string(),
+  memo_snippet: z.string(),
+  create_time: z.string(),
 });
 
 export type CreateMemoInput = z.infer<typeof createMemoSchema>;
 export type UpdateMemoInput = z.infer<typeof updateMemoSchema>;
 export type ListMemosQuery = z.infer<typeof listMemosQuerySchema>;
+export type MemoStatsQuery = z.infer<typeof memoStatsQuerySchema>;
+export type MemoVisibility = z.infer<typeof memoVisibilitySchema>;
+export type MemoState = z.infer<typeof memoStatusSchema>;
+export type MemoOrderBy = z.infer<typeof memoOrderBySchema>;
 export type MemoDto = z.infer<typeof memoDtoSchema>;
 export type ListMemosResponse = z.infer<typeof listMemosResponseSchema>;
+export type MemoStatsResponse = z.infer<typeof memoStatsResponseSchema>;
+export type DailyReviewQuery = z.infer<typeof dailyReviewQuerySchema>;
+export type RandomMemoQuery = z.infer<typeof randomMemoQuerySchema>;
+export type WalkNextQuery = z.infer<typeof walkNextQuerySchema>;
+export type RelatedMemosQuery = z.infer<typeof relatedMemosQuerySchema>;
+export type ReviewWalkVia = z.infer<typeof reviewWalkViaSchema>;
+export type DailyReviewResponse = { memos: MemoDto[] };
+export type RandomMemoResponse = { memo: MemoDto | null };
+export type WalkNextResponse = {
+  memo: MemoDto | null;
+  via: ReviewWalkVia | null;
+};
+export type RelatedMemoEntry = MemoDto & {
+  shared_tags: string[];
+  via_relation: boolean;
+};
+export type RelatedMemosResponse = { memos: RelatedMemoEntry[] };
+export type ListNotificationsQuery = z.infer<
+  typeof listNotificationsQuerySchema
+>;
+export type UpdateNotificationInput = z.infer<typeof updateNotificationSchema>;
+export type AppNotificationDto = z.infer<typeof appNotificationDtoSchema>;
+export type ListAppNotificationsResponse = {
+  notifications: AppNotificationDto[];
+  next_page_token?: string;
+};
 export type AttachmentDto = z.infer<typeof attachmentDtoSchema>;
 export type ListAttachmentsQuery = z.infer<typeof listAttachmentsQuerySchema>;
 export type BindMemoAttachmentsInput = z.infer<
@@ -190,7 +509,25 @@ export type MemoRelationDto = z.infer<typeof memoRelationDtoSchema>;
 export type PatchMemoRelationsInput = z.infer<typeof patchMemoRelationsSchema>;
 export type ShareDto = z.infer<typeof shareDtoSchema>;
 export type CreateShareInput = z.infer<typeof createShareSchema>;
+export type MemoRevisionDto = z.infer<typeof memoRevisionDtoSchema>;
+export type MemoContextResponse = z.infer<typeof memoContextResponseSchema>;
 export type PublicShareDto = z.infer<typeof publicShareDtoSchema>;
 export type ExportAttachment = z.infer<typeof exportAttachmentSchema>;
 export type ImportBundle = z.infer<typeof importBundleSchema>;
+export type ImportOptions = z.infer<typeof importOptionsSchema>;
 export type ImportResult = z.infer<typeof importResultSchema>;
+export type DataTaskDto = z.infer<typeof dataTaskDtoSchema>;
+export type DataTaskStatus = z.infer<typeof dataTaskStatusSchema>;
+export type DataTaskListResponse = z.infer<typeof dataTaskListResponseSchema>;
+export type CreateDataTaskResponse = z.infer<
+  typeof createDataTaskResponseSchema
+>;
+export type CreateImportTaskRequest = z.infer<
+  typeof createImportTaskRequestSchema
+>;
+export type ExportManifest = z.infer<typeof exportManifestSchema>;
+export type TagHierarchyNode = z.infer<typeof tagHierarchyNodeSchema>;
+export type TagHierarchyResponse = z.infer<typeof tagHierarchyResponseSchema>;
+export type RenameTagInput = z.infer<typeof renameTagRequestSchema>;
+export type RenameTagResponse = z.infer<typeof renameTagResponseSchema>;
+export type DeleteTagResponse = z.infer<typeof deleteTagResponseSchema>;
