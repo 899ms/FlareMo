@@ -27,8 +27,12 @@ export function UpdateStatus() {
   // the null key keeps the upstream default so self-hosted installs without a
   // configured repository behave exactly as before.
   const releaseQuery = useQuery({
-    queryKey: ["latest-release", appInfoQuery.data?.update_repository ?? null],
-    queryFn: () => getLatestRelease(appInfoQuery.data?.update_repository),
+    queryKey: [
+      "latest-release",
+      appInfoQuery.data?.update_release_repository ?? null,
+    ],
+    queryFn: () =>
+      getLatestRelease(appInfoQuery.data?.update_release_repository),
     retry: false,
     staleTime: 30 * 60 * 1_000,
   });

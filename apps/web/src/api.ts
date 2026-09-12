@@ -87,6 +87,7 @@ export type AppInfo = {
   product: "FlareMo";
   version: string;
   update_repository: string | null;
+  update_release_repository: string;
   update_workflow_url: string | null;
   releases_url: string;
   update_guide_url: string;

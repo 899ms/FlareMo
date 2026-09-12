@@ -99,6 +99,9 @@ appApi.get("/health", async (c) => {
       product: "FlareMo",
       version: FLAREMO_API_VERSION,
       update_repository: repository,
+      update_release_repository:
+        normalizeGitHubRepository(c.env.FLAREMO_UPDATE_RELEASE_REPOSITORY) ??
+        "realchendahuang/FlareMo",
       update_workflow_url: repository
         ? `https://github.com/${repository}/actions/workflows/flaremo-update.yml`
         : null,
