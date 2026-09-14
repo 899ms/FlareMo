@@ -242,6 +242,22 @@ flowchart LR
 
 ---
 
+## 定位：AI native 的个人知识管理
+
+FlareMo 要做的是 **AI native 的个人知识管理**——一个人用是安静的私人笔记，一个团队用是共享的知识库，并且把语义检索、AI 记忆、Agent 读写这些能力做成产品的原生部分。它和 Memos 的目标不一样，所以**不以「完全兼容」为目标**。
+
+Memos 是 FlareMo 选定的生态底座，不是要复刻的对象：
+
+- **能复用的就复用**：领域模型、资源命名、`/api/v1` 协议、OpenAPI、导入导出和 MCP 方向，以及围绕它们生长的第三方客户端与脚本生态。
+- **上游没有的，自己扩展**：Agent Memory、语义检索与「找一找」、项目与任务、音频文稿阅读等，都是 FlareMo 原生能力，不受上游形态约束。
+- **上游有的，也按需兼容**：只在我们需要、且语义说得通的时候接。`AIService.Transcribe` 这类上游接口在 FlareMo 明确返回 `501`，因为 AI 能力是 FlareMo 自己的赛道。
+
+**未来与上游分叉是预期结果，不是意外。** 兼容是「借一个成熟底座、少走弯路」的手段，不是产品目标本身；FlareMo 的方向由自己的需求定义。
+
+兼容面有一条工程纪律：`/api/v1/*` 的**既有字段与语义是第三方客户端的契约**，只做加法、不改形状——新增能力优先落在 FlareMo 原生面 `/api/app/*`，或写入可自由扩展的 memo payload。这样既能持续复用 Memos 生态，也不妨碍 FlareMo 往前长。详见 [docs/architecture-notes.md](./docs/architecture-notes.md) 的兼容策略章节。
+
+---
+
 ## Memos 兼容面
 
 FlareMo 保留 Memos 风格的核心实体，目标是复用 Memos 的客户端、脚本、导入导出和周边工具，而不是把原版 Memos 的 Go server 搬过来。
@@ -357,3 +373,7 @@ FlareMo 以 [GNU AGPL-3.0](./LICENSE)（AGPL-3.0-only）授权开源。
 - 自部署、修改和再分发按 AGPL-3.0 条款执行；以网络服务形式提供修改版本时，需要向该服务的使用者公开对应源码。
 - Copyright (c) 2026 realchendahuang。版权持有者可以在 AGPL-3.0 之外，为 FlareMo 托管服务使用双许可。
 - "FlareMo" 名称与标识不属于 AGPL-3.0 授权范围；fork 与衍生项目不得使用 FlareMo 品牌进行推广或暗示官方背书。
+
+### 主动语音记录（Capture）
+
+登录后进入 `/capture`，点击开始，在前台实时识别语音；停止后编辑文字并保存为普通记录，默认仅自己可见并带 `voice` 标签。支持腾讯云或 DashScope 实时 ASR；未配置时不显示导航入口。不保存原始音频，不承诺后台或锁屏录音。配置和真机验收见 [Voice Capture](docs/voice-capture.md)。
